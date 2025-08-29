@@ -25,7 +25,7 @@
 
 // --- Configuration ---
 // IMPORTANT: Replace this with the MAC address of your push cart's ESP32.
-uint8_t receiverMacAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+uint8_t receiverMacAddress[] = {0x6C, 0xC8, 0x40, 0x86, 0x3C, 0x68};
 
 // Create an instance of the ADS1115
 Adafruit_ADS1115 ads;
@@ -60,6 +60,8 @@ float map_float(float x, float in_min, float in_max, float out_min, float out_ma
 //================================================================================
 void setup() {
     Serial.begin(115200);
+    // Give some time for the serial monitor to start
+    delay(1000);
     Serial.println("T-Beam ESP-NOW Controller (ADS1115) Initializing...");
 
     // Initialize I2C for the ADS1115
@@ -128,8 +130,9 @@ void loop() {
     esp_err_t result = esp_now_send(receiverMacAddress, (uint8_t *) &controlData, sizeof(controlData));
 
     if (result == ESP_OK) {
-        Serial.printf("Raw: X=%d, Y=%d  |  Sent: Thr=%.2f, Ste=%.2f\n", rawX, rawY, controlData.throttle, controlData.steering);
-    } else {
+        // Serial.printf("Raw: X=%d, Y=%d  |  Sent: Thr=%.2f, Ste=%.2f\n", rawX, rawY, controlData.throttle, controlData.steering);
+        
+      } else {
         Serial.println("Error sending the data");
     }
 
