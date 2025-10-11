@@ -1,11 +1,17 @@
 /*
  * LilyGO T-Beam ESP-NOW Controller (with ADS1115 ADC & Toggle Button)
+ * with Non-Blocking GPS Position Logging
+ *
  * Author: Gemini
- * Date: September 16, 2025
- * * Description:
+ * Date: October 1, 2025
+ *
+ * Description:
  * This sketch reads an analog joystick (ADS1115) and a toggle button,
  * then transmits the control data to a receiver via ESP-NOW.
- * The button on GPIO 38 acts as a toggle (push-on, push-off).
+ *
+ * It also continuously reads data from the built-in GPS module in a
+ * non-blocking way. Every 5 seconds, if a valid fix is available, it stores
+ * the coordinates and timestamp into a vector.
  *
  * Hardware Setup:
  * - ADS1115 SCL -> T-Beam GPIO 22
@@ -13,6 +19,7 @@
  * - Joystick Y-axis -> ADS1115 A0
  * - Joystick X-axis -> ADS1115 A1
  * - Push Button -> T-Beam GPIO 38 and GND
+ * - GPS Module (Onboard): Connected to Serial1 (TX:34, RX:12)
  */
 #define XPOWERS_CHIP_AXP2101
 
@@ -22,6 +29,11 @@
 #include <Wire.h>
 #include <Adafruit_ADS1X15.h>
 #include "XPowersLib.h"
+
+// --- ADDED: GPS Libraries ---
+#include <TinyGPS++.h>
+#include <HardwareSerial.h>
+#include <vector> // Used to store a history of GPS coordinates
 
 #ifndef CONFIG_PMU_SDA
 #define CONFIG_PMU_SDA 21
@@ -52,16 +64,52 @@ const int JOYSTICK_CENTER_Y = 13350;
 const int JOYSTICK_DEADZONE = 500;
 
 // --- Button Debounce & Toggle Logic ---
-bool g_button_toggle_state = false;    // The actual toggle state (0 or 1), defaults to 0.
-int g_last_button_state = HIGH;        // Used to detect a press event.
+bool g_button_toggle_state = false;
+int g_last_button_state = HIGH;
 unsigned long g_last_debounce_time = 0;
-const unsigned long DEBOUNCE_DELAY = 50; // 50ms debounce delay.
+const unsigned long DEBOUNCE_DELAY = 50;
+
+// --- ADDED: Variables for LED Status & Long Press ---
+unsigned long g_last_gps_blink_time = 0;
+bool g_gps_led_on = false;
+unsigned long g_button_press_start_time = 0;
+bool g_long_press_action_done = false;
+const unsigned long LONG_PRESS_DURATION = 2000; // 2 seconds for a long press
+
+// --- ADDED: GPS Configuration ---
+static const int GPS_RX_PIN = 12; // T-Beam v1.0/v1.1
+static const int GPS_TX_PIN = 34; // T-Beam v1.0/v1.1
+static const uint32_t GPS_BAUD = 9600;
+
+// TinyGPS++ object to process GPS data
+TinyGPSPlus gps;
+
+// The hardware serial port for the GPS module (UART 1)
+HardwareSerial gpsSerial(1);
+
+// --- ADDED: GPS Data Storage ---
+struct GPSLog {
+    double latitude;
+    double longitude;
+    uint16_t year;
+    uint8_t month;
+    uint8_t day;
+    uint8_t hour;
+    uint8_t minute;
+    uint8_t second;
+};
+
+std::vector<GPSLog> gps_log_history;
+const int MAX_LOG_HISTORY = 100; // Limit stored points to prevent memory overflow
+unsigned long lastGpsLogTime = 0;
+const unsigned long GPS_LOG_INTERVAL = 5000; // Log position every 5000 ms (5 seconds)
+
 
 // --- Data Structure ---
 typedef struct ControlData {
-    float throttle;     // Range: -1.0 to 1.0
-    float steering;     // Range: -1.0 to 1.0
-    bool button_state;  // ADDED: 0 for off, 1 for on
+    float throttle;
+    float steering;
+    bool button_state;
 } ControlData;
 
 ControlData controlData;
@@ -83,7 +131,7 @@ void checkBatteryAndFlash() {
     int percent = power.getBatteryPercent();
     if (percent < 10) {
         unsigned long now = millis();
-        if (now - lastBlinkTime >= 500) { // toggle every 500ms = 1Hz blink
+        if (now - lastBlinkTime >= 500) {
             ledOn = !ledOn;
             if (ledOn) {
                 power.setChargingLedMode(XPOWERS_CHG_LED_ON);
@@ -93,11 +141,35 @@ void checkBatteryAndFlash() {
             lastBlinkTime = now;
         }
     } else {
-        // restore LED to steady ON when battery is above 10%
         power.setChargingLedMode(XPOWERS_CHG_LED_ON);
     }
 }
 
+// --- ADDED: GPS Processing Function ---
+// This function reads from the GPS serial port and feeds the data to the
+// TinyGPS++ object. It should be called in every loop iteration.
+void processGPS() {
+    while (gpsSerial.available() > 0) {
+        gps.encode(gpsSerial.read());
+    }
+}
+
+// --- ADDED: Function to print all stored GPS data ---
+void printGpsHistory() {
+    Serial.println("\n\n--- GPS Log History (CSV Format) ---");
+    Serial.println("Latitude,Longitude,Year,Month,Day,Hour,Minute,Second");
+
+    if (gps_log_history.empty()) {
+        Serial.println("No GPS data has been logged.");
+    } else {
+        for (const auto& log : gps_log_history) {
+            Serial.printf("%.6f,%.6f,%d,%d,%d,%d,%d,%d\n",
+                log.latitude, log.longitude, log.year, log.month, log.day,
+                log.hour, log.minute, log.second);
+        }
+    }
+    Serial.println("--- End of Log ---\n");
+}
 
 //================================================================================
 // Main Program: setup() and loop()
@@ -105,16 +177,14 @@ void checkBatteryAndFlash() {
 void setup() {
     Serial.begin(115200);
     delay(1000);
-    Serial.println("T-Beam ESP-NOW Controller (ADS1115 + Button) Initializing...");
+    Serial.println("T-Beam ESP-NOW Controller (ADS1115 + Button + GPS) Initializing...");
 
-    // ADDED: Configure the button pin with an internal pull-up resistor.
+    // Configure the button pin
     pinMode(BUTTON_PIN, INPUT_PULLUP);
     Serial.println("Button on GPIO 38 configured.");
 
-    // Initialize I2C for PMU and ADS1115
-    bool result = power.begin(Wire, AXP2101_SLAVE_ADDRESS, CONFIG_PMU_SDA, CONFIG_PMU_SCL);
-
-    if (result == false) {
+    // Initialize I2C for PMU
+    if (!power.begin(Wire, AXP2101_SLAVE_ADDRESS, CONFIG_PMU_SDA, CONFIG_PMU_SCL)) {
         Serial.println("PMU is not online..."); while (1)delay(50);
     }
     Serial.println("PMU AXP2101 init success!");
@@ -128,6 +198,12 @@ void setup() {
     }
     ads.setGain(GAIN_ONE);
     Serial.println("ADS1115 Initialized.");
+
+    // --- ADDED: Initialize GPS Serial ---
+    Serial.println("Initializing GPS...");
+    // Note: T-Beam uses different pins for different versions. v1.1 uses 34, 12.
+    gpsSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_TX_PIN, GPS_RX_PIN);
+    Serial.println("GPS Serial Port Initialized. Waiting for data...");
 
     // Set device as a Wi-Fi Station
     WiFi.mode(WIFI_STA);
@@ -153,29 +229,42 @@ void setup() {
 
     Serial.println("ESP-NOW Initialized. Ready to send data.");
     power.enableGeneralAdcChannel();
-
 }
 
 void loop() {
-    // --- ADDED: Button Toggle Logic ---
+    // --- Process any incoming GPS data ---
+    processGPS();
+
+    // --- Button Logic: Handle Toggle (short press) and Log Dump (long press) ---
     int current_button_state = digitalRead(BUTTON_PIN);
 
-    // Check for a button press (transition from HIGH to LOW)
+    // Short press (toggle) detection on the falling edge (press down)
     if (current_button_state == LOW && g_last_button_state == HIGH) {
-        // Check if the debounce delay has passed since the last press
         if ((millis() - g_last_debounce_time) > DEBOUNCE_DELAY) {
-            // Toggle the state
             g_button_toggle_state = !g_button_toggle_state;
-            g_last_debounce_time = millis(); // Reset the debounce timer
+            g_last_debounce_time = millis();
         }
     }
-    // Update the last known button state for the next loop iteration
+    
+    // Long press (data dump) detection
+    if (current_button_state == LOW) { // If button is currently pressed
+        if (g_last_button_state == HIGH) { // If it was just pressed, start the timer
+            g_button_press_start_time = millis();
+        }
+        // If it has been held long enough and we haven't already acted
+        if (millis() - g_button_press_start_time > LONG_PRESS_DURATION && !g_long_press_action_done) {
+            printGpsHistory();
+            g_long_press_action_done = true; // Prevents this from running repeatedly
+        }
+    } else { // Button is not pressed
+        g_long_press_action_done = false; // Reset the long press flag when released
+    }
     g_last_button_state = current_button_state;
 
 
     // --- Read analog joystick values from the ADS1115 ---
-    int16_t rawY = ads.readADC_SingleEnded(0); // Y-axis on A0
-    int16_t rawX = ads.readADC_SingleEnded(1); // X-axis on A1
+    int16_t rawY = ads.readADC_SingleEnded(0);
+    int16_t rawX = ads.readADC_SingleEnded(1);
 
     // Apply deadzone and map to -1.0 to 1.0 range
     float throttle = 0.0;
@@ -188,25 +277,63 @@ void loop() {
         steering = map_float(rawX, 176, ADC_MAX, -1.0, 1.0);
     }
     
-    // Constrain values to ensure they are within the expected range
     throttle = constrain(throttle, -1.0, 1.0);
     steering = constrain(steering, -1.0, 1.0);
 
     // Load data into the struct
     controlData.throttle = throttle;
     controlData.steering = steering;
-    controlData.button_state = g_button_toggle_state; // <-- Assign the button's toggle state
+    controlData.button_state = g_button_toggle_state;
 
     // Send the data via ESP-NOW
-    esp_err_t result = esp_now_send(receiverMacAddress, (uint8_t *) &controlData, sizeof(controlData));
+    esp_now_send(receiverMacAddress, (uint8_t *) &controlData, sizeof(controlData));
+    
 
-    if (result == ESP_OK) {
-        // Updated the print statement to include the button state
-        Serial.printf("Raw: X=%d, Y=%d | Sent: Thr=%.4f, Ste=%.4f, Btn=%d, BatteryPercent:%d\n", rawX, rawY, controlData.throttle, controlData.steering, controlData.button_state, power.getBatteryPercent());
-    } else {
-        Serial.println("Error sending the data");
+    // --- GPS Logging Logic (Non-Blocking) ---
+    unsigned long currentTime = millis();
+    if (currentTime - lastGpsLogTime >= GPS_LOG_INTERVAL) {
+        lastGpsLogTime = currentTime; // Reset the timer
+
+        if (gps.location.isValid()) {
+            GPSLog new_log;
+            new_log.latitude = gps.location.lat();
+            new_log.longitude = gps.location.lng();
+            new_log.year = gps.date.year();
+            new_log.month = gps.date.month();
+            new_log.day = gps.date.day();
+            new_log.hour = gps.time.hour();
+            new_log.minute = gps.time.minute();
+            new_log.second = gps.time.second();
+
+            if (gps_log_history.size() >= MAX_LOG_HISTORY) {
+                gps_log_history.erase(gps_log_history.begin());
+            }
+            gps_log_history.push_back(new_log);
+
+            Serial.printf("Logged GPS Position: Lat: %.6f, Lng: %.6f | Sats: %d | Total logs: %zu\n",
+                          new_log.latitude, new_log.longitude, gps.satellites.value(), gps_log_history.size());
+        } else {
+            Serial.printf("Waiting for GPS fix... Satellites in view: %d\n", gps.satellites.value());
+        }
     }
 
-    checkBatteryAndFlash();
-    delay(50); // Send data at ~20 Hz
+    // --- Status LED Logic ---
+    if (power.getBatteryPercent() < 10) {
+        // Low battery warning takes priority over GPS status
+        checkBatteryAndFlash();
+    } else {
+        // Otherwise, show GPS status
+        if (gps.location.isValid()) {
+            power.setChargingLedMode(XPOWERS_CHG_LED_ON); // Solid ON for GPS fix
+        } else {
+            // Blink slowly if searching for satellites
+            if (currentTime - g_last_gps_blink_time >= 1000) { // 1-second interval
+                g_last_gps_blink_time = currentTime;
+                g_gps_led_on = !g_gps_led_on;
+                power.setChargingLedMode(g_gps_led_on ? XPOWERS_CHG_LED_ON : XPOWERS_CHG_LED_OFF);
+            }
+        }
+    }
+    
+    delay(50);
 }
