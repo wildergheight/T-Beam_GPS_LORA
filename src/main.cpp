@@ -52,7 +52,7 @@ uint8_t receiverMacAddress[] = {0x6C, 0xC8, 0x40, 0x86, 0x3C, 0x68};
 
 // --- Pin Definitions ---
 const int BUTTON_PIN = 38;
-// const int AUTO_PIN = XX;
+const int AUTO_PIN = 25;
 
 // --- I2C Device Instances ---
 Adafruit_ADS1115 ads;
@@ -210,8 +210,8 @@ void setup() {
     Serial.println("Button on GPIO 38 configured.");
 
     // Configure the Auto 3 Way Switch
-    // pinMode(AUTO_PIN, INPUT_PULLUP);
-    // Serial.println("Switch on GPIO XX configured.");
+    pinMode(AUTO_PIN, INPUT_PULLUP);
+    Serial.println("Switch on GPIO XX configured.");
 
     // Initialize I2C for PMU
     if (!power.begin(Wire, AXP2101_SLAVE_ADDRESS, CONFIG_PMU_SDA, CONFIG_PMU_SCL)) {
@@ -266,7 +266,8 @@ void loop() {
     processGPS();
 
     // -- Auto Logic
-    // int current_auto_state = digitalRead(AUTO_PIN);
+    int current_auto_state = digitalRead(AUTO_PIN);
+    Serial.println(current_auto_state);
 
     // --- Button Logic: Handle Toggle (short), Erase (double), and Dump (long) ---
     int current_button_state = digitalRead(BUTTON_PIN);
@@ -383,7 +384,7 @@ void loop() {
             Serial.printf("Logged GPS Position: Lat: %.6f, Lng: %.6f | Sats: %d | Total logs: %zu\n",
                           new_log.latitude, new_log.longitude, gps.satellites.value(), gps_log_history.size());
         } else {
-            Serial.printf("Waiting for GPS fix... Satellites in view: %d\n", gps.satellites.value());
+            // Serial.printf("Waiting for GPS fix... Satellites in view: %d\n", gps.satellites.value());
         }
     }
 
