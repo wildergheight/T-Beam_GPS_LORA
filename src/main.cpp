@@ -52,6 +52,7 @@ uint8_t receiverMacAddress[] = {0x6C, 0xC8, 0x40, 0x86, 0x3C, 0x68};
 
 // --- Pin Definitions ---
 const int BUTTON_PIN = 38;
+// const int AUTO_PIN = XX;
 
 // --- I2C Device Instances ---
 Adafruit_ADS1115 ads;
@@ -69,12 +70,22 @@ int g_last_button_state = HIGH;
 unsigned long g_last_debounce_time = 0;
 const unsigned long DEBOUNCE_DELAY = 50;
 
+// --- Auto Mode 3 Way Switch ---
+bool hardware_auto_mode = false;
+
 // --- ADDED: Variables for LED Status & Long Press ---
 unsigned long g_last_gps_blink_time = 0;
 bool g_gps_led_on = false;
 unsigned long g_button_press_start_time = 0;
 bool g_long_press_action_done = false;
 const unsigned long LONG_PRESS_DURATION = 2000; // 2 seconds for a long press
+
+//Variables for Manual/Auto Mode from 3 way switch
+bool auto_mode = false;
+
+// --- ADDED: Variables for Double Press Detection ---
+unsigned long g_last_press_time = 0;
+const unsigned long DOUBLE_PRESS_WINDOW = 300; // Time in ms for a double press
 
 // --- ADDED: GPS Configuration ---
 static const int GPS_RX_PIN = 12; // T-Beam v1.0/v1.1
@@ -100,7 +111,7 @@ struct GPSLog {
 };
 
 std::vector<GPSLog> gps_log_history;
-const int MAX_LOG_HISTORY = 100; // Limit stored points to prevent memory overflow
+const int MAX_LOG_HISTORY = 2000; // Limit stored points to prevent memory overflow
 unsigned long lastGpsLogTime = 0;
 const unsigned long GPS_LOG_INTERVAL = 5000; // Log position every 5000 ms (5 seconds)
 
@@ -110,6 +121,7 @@ typedef struct ControlData {
     float throttle;
     float steering;
     bool button_state;
+    bool auto_mode;
 } ControlData;
 
 ControlData controlData;
@@ -171,6 +183,20 @@ void printGpsHistory() {
     Serial.println("--- End of Log ---\n");
 }
 
+// --- ADDED: Function to clear GPS history and confirm with LED ---
+void clearGpsHistory() {
+    gps_log_history.clear();
+    Serial.println("\n*** GPS Log History Erased! ***\n");
+
+    // Quick triple-blink confirmation
+    for (int i=0; i<3; i++) {
+        power.setChargingLedMode(XPOWERS_CHG_LED_OFF);
+        delay(75);
+        power.setChargingLedMode(XPOWERS_CHG_LED_ON);
+        delay(75);
+    }
+}
+
 //================================================================================
 // Main Program: setup() and loop()
 //================================================================================
@@ -182,6 +208,10 @@ void setup() {
     // Configure the button pin
     pinMode(BUTTON_PIN, INPUT_PULLUP);
     Serial.println("Button on GPIO 38 configured.");
+
+    // Configure the Auto 3 Way Switch
+    // pinMode(AUTO_PIN, INPUT_PULLUP);
+    // Serial.println("Switch on GPIO XX configured.");
 
     // Initialize I2C for PMU
     if (!power.begin(Wire, AXP2101_SLAVE_ADDRESS, CONFIG_PMU_SDA, CONFIG_PMU_SCL)) {
@@ -235,13 +265,24 @@ void loop() {
     // --- Process any incoming GPS data ---
     processGPS();
 
-    // --- Button Logic: Handle Toggle (short press) and Log Dump (long press) ---
+    // -- Auto Logic
+    // int current_auto_state = digitalRead(AUTO_PIN);
+
+    // --- Button Logic: Handle Toggle (short), Erase (double), and Dump (long) ---
     int current_button_state = digitalRead(BUTTON_PIN);
 
-    // Short press (toggle) detection on the falling edge (press down)
+    // Detect the falling edge (the moment the button is pressed)
     if (current_button_state == LOW && g_last_button_state == HIGH) {
         if ((millis() - g_last_debounce_time) > DEBOUNCE_DELAY) {
-            g_button_toggle_state = !g_button_toggle_state;
+            // Check if this press is within the double-press window
+            if (millis() - g_last_press_time < DOUBLE_PRESS_WINDOW) {
+                clearGpsHistory();
+                g_last_press_time = 0; // Reset timer to prevent a triple-press action
+            } else {
+                // It's a single press, so toggle the state
+                g_button_toggle_state = !g_button_toggle_state;
+            }
+            g_last_press_time = millis(); // Record the time of this press
             g_last_debounce_time = millis();
         }
     }
@@ -275,7 +316,8 @@ void loop() {
     float steering = 0.0;
     if (abs(rawX - JOYSTICK_CENTER_X) > JOYSTICK_DEADZONE) {
         steering = map_float(rawX, 176, ADC_MAX, -1.0, 1.0);
-    }
+    }            // Serial.printf("Waiting for GPS fix... Satellites in view: %d\n", gps.satellites.value());
+
     
     throttle = constrain(throttle, -1.0, 1.0);
     steering = constrain(steering, -1.0, 1.0);
@@ -284,6 +326,34 @@ void loop() {
     controlData.throttle = throttle;
     controlData.steering = steering;
     controlData.button_state = g_button_toggle_state;
+
+    // Serial.println(steering);
+
+    // Auto Control Logic (Supercedes manual control above)
+
+    // if (current_auto_state){
+    //     controlData.auto_mode = true;
+    //     // IN AUTO MODE, THROTTLE IS LEFT MOTOR AND STEERING IS RIGHT MOTOR
+    //     if (throttle > 0.5 && abs(steering < 0.5)){ // FORWARD
+    //         controlData.throttle = -1;
+    //         controlData.steering = 1;
+    //     }
+    //     else if (steering > 0.5) { // RIGHT
+    //         controlData.throttle = -1;
+    //         controlData.steering = 0.85;
+    //     }
+    //     else if (steering < -0.5) { // LEFT
+    //         controlData.throttle = -0.85;
+    //         controlData.steering = 1;
+    //     }
+    //     else{
+    //         controlData.throttle = 0;
+    //         controlData.steering = 0;
+    //     }
+    // }
+    // else {
+    //     controlData.auto_mode = false;
+    // }
 
     // Send the data via ESP-NOW
     esp_now_send(receiverMacAddress, (uint8_t *) &controlData, sizeof(controlData));
@@ -298,7 +368,7 @@ void loop() {
             GPSLog new_log;
             new_log.latitude = gps.location.lat();
             new_log.longitude = gps.location.lng();
-            new_log.year = gps.date.year();
+            new_log.year = gps.satellites.value();
             new_log.month = gps.date.month();
             new_log.day = gps.date.day();
             new_log.hour = gps.time.hour();
