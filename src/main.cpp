@@ -70,9 +70,6 @@ int g_last_button_state = HIGH;
 unsigned long g_last_debounce_time = 0;
 const unsigned long DEBOUNCE_DELAY = 50;
 
-// --- Auto Mode 3 Way Switch ---
-bool hardware_auto_mode = false;
-
 // --- ADDED: Variables for LED Status & Long Press ---
 unsigned long g_last_gps_blink_time = 0;
 bool g_gps_led_on = false;
@@ -211,7 +208,7 @@ void setup() {
 
     // Configure the Auto 3 Way Switch
     pinMode(AUTO_PIN, INPUT_PULLUP);
-    Serial.println("Switch on GPIO XX configured.");
+    Serial.println("Switch on GPIO 25 configured.");
 
     // Initialize I2C for PMU
     if (!power.begin(Wire, AXP2101_SLAVE_ADDRESS, CONFIG_PMU_SDA, CONFIG_PMU_SCL)) {
@@ -267,7 +264,7 @@ void loop() {
 
     // -- Auto Logic
     int current_auto_state = digitalRead(AUTO_PIN);
-    Serial.println(current_auto_state);
+    // Serial.println(current_auto_state);
 
     // --- Button Logic: Handle Toggle (short), Erase (double), and Dump (long) ---
     int current_button_state = digitalRead(BUTTON_PIN);
@@ -332,29 +329,35 @@ void loop() {
 
     // Auto Control Logic (Supercedes manual control above)
 
-    // if (current_auto_state){
-    //     controlData.auto_mode = true;
-    //     // IN AUTO MODE, THROTTLE IS LEFT MOTOR AND STEERING IS RIGHT MOTOR
-    //     if (throttle > 0.5 && abs(steering < 0.5)){ // FORWARD
-    //         controlData.throttle = -1;
-    //         controlData.steering = 1;
-    //     }
-    //     else if (steering > 0.5) { // RIGHT
-    //         controlData.throttle = -1;
-    //         controlData.steering = 0.85;
-    //     }
-    //     else if (steering < -0.5) { // LEFT
-    //         controlData.throttle = -0.85;
-    //         controlData.steering = 1;
-    //     }
-    //     else{
-    //         controlData.throttle = 0;
-    //         controlData.steering = 0;
-    //     }
-    // }
-    // else {
-    //     controlData.auto_mode = false;
-    // }
+    if (current_auto_state == 1){
+        controlData.auto_mode = true;
+        // IN AUTO MODE, THROTTLE IS LEFT MOTOR AND STEERING IS RIGHT MOTOR
+        if (throttle > 0.5 && abs(steering < 0.5)){ // FORWARD
+            controlData.throttle = -1;
+            controlData.steering = 1;
+        }
+        else if (steering > 0.5) { // RIGHT
+            controlData.throttle = -1;
+            controlData.steering = 0.85;
+        }
+        else if (steering < -0.5) { // LEFT
+            controlData.throttle = -0.85;
+            controlData.steering = 1;
+        }
+        else{
+            controlData.throttle = 0;
+            controlData.steering = 0;
+        }
+    }
+    else {
+        controlData.auto_mode = false;
+    }
+
+    // Serial.println(throttle);
+    // Serial.println(steering);
+    // Serial.println(auto_mode);
+
+    // Serial.printf("Throttle/Left: %f, Steering/Right: %f, Manual/Auto: %d\n", controlData.throttle, controlData.steering, controlData.auto_mode);
 
     // Send the data via ESP-NOW
     esp_now_send(receiverMacAddress, (uint8_t *) &controlData, sizeof(controlData));
