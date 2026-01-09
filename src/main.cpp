@@ -331,18 +331,22 @@ void loop() {
 
     if (current_auto_state == 1){
         controlData.auto_mode = true;
-        // IN AUTO MODE, THROTTLE IS LEFT MOTOR AND STEERING IS RIGHT MOTOR
+        // IN AUTO MODE, THROTTLE IS RIGHT MOTOR AND STEERING IS LEFT MOTOR
         if (throttle > 0.5 && abs(steering < 0.5)){ // FORWARD
             controlData.throttle = -1;
             controlData.steering = 1;
         }
-        else if (steering > 0.5) { // RIGHT
+        else if (steering < -0.5) { // RIGHT
             controlData.throttle = -1;
             controlData.steering = 0.85;
         }
-        else if (steering < -0.5) { // LEFT
+        else if (steering > 0.5) { // LEFT
             controlData.throttle = -0.85;
             controlData.steering = 1;
+        }
+        else if (throttle < -0.5 && abs(steering < 0.5)) { // SLOWER (BACK)
+            controlData.throttle = -0.66;
+            controlData.steering = 0.66;
         }
         else{
             controlData.throttle = 0;
