@@ -35,6 +35,10 @@
 #include <HardwareSerial.h>
 #include <vector> // Used to store a history of GPS coordinates
 
+//LoRa Library
+#include <RadioLib.h>
+
+
 #ifndef CONFIG_PMU_SDA
 #define CONFIG_PMU_SDA 21
 #endif
@@ -80,14 +84,34 @@ const unsigned long LONG_PRESS_DURATION = 2000; // 2 seconds for a long press
 //Variables for Manual/Auto Mode from 3 way switch
 bool auto_mode = false;
 
+//motor timing
+int lastMotorCommandTime = 0;
+int motorCommandDelay = 50; //milliseconds between motor commands
+
 // --- ADDED: Variables for Double Press Detection ---
 unsigned long g_last_press_time = 0;
 const unsigned long DOUBLE_PRESS_WINDOW = 300; // Time in ms for a double press
+
+// SX1276 radio = new Module(5, 2, 14); 
+SX1276 radio = new Module(18, 26, 23); 
+
+// Timing Constants
+const unsigned long TX_INTERVAL = 1000;  // Send every 2 seconds
+const unsigned long RX_TIMEOUT = 300;   // Listen for 0.5 seconds
+
+// State Machine Variables
+enum RadioState { IDLE, LISTENING };
+RadioState currentMode = IDLE;
+unsigned long lastTxTime = 0;
+unsigned long startListenTime = 0;
 
 // --- ADDED: GPS Configuration ---
 static const int GPS_RX_PIN = 12; // T-Beam v1.0/v1.1
 static const int GPS_TX_PIN = 34; // T-Beam v1.0/v1.1
 static const uint32_t GPS_BAUD = 9600;
+
+double current_gps_lat = 0.0;
+double current_gps_long = 0.0;
 
 // TinyGPS++ object to process GPS data
 TinyGPSPlus gps;
@@ -112,6 +136,21 @@ const int MAX_LOG_HISTORY = 2000; // Limit stored points to prevent memory overf
 unsigned long lastGpsLogTime = 0;
 const unsigned long GPS_LOG_INTERVAL = 5000; // Log position every 5000 ms (5 seconds)
 
+struct __attribute__((packed)) GpsPacket {
+  uint8_t rh_to = 0xFF; uint8_t rh_from = 0x01; uint8_t rh_id = 0x00; uint8_t rh_flags = 0x00;
+  uint32_t timestamp;
+  double latitude;
+  double longitude;
+  int16_t alt_cm;
+};
+
+struct __attribute__((packed)) TelemPacket {
+  uint8_t rh_to; uint8_t rh_from; uint8_t rh_id; uint8_t rh_flags;
+  uint32_t status;
+  double speed;
+  double distance_to_target;
+  int16_t heading;
+};
 
 // --- Data Structure ---
 typedef struct ControlData {
@@ -154,12 +193,91 @@ void checkBatteryAndFlash() {
     }
 }
 
+void loRaSetup() {
+  Serial.println(F("Starting Radio..."));
+
+  // Start SPI with T-Beam specific pins before radio.begin
+  // SCK: 5, MISO: 19, MOSI: 27, NSS: 18
+  SPI.begin(5, 19, 27, 18); 
+
+  int state = radio.begin(433.0, 125.0, 7, 5, 0x12, 10, 8);
+
+  if (state == RADIOLIB_ERR_NONE) {
+    Serial.println(F("Radio is good!"));
+  } else {
+    Serial.print(F("Radio failed, code: "));
+    Serial.println(state);
+    // Common codes: 
+    // -2: Chip not found (Check Power/SPI)
+    // -16: SPI error
+    // while (true); 
+  }
+}
+
+void handleLoRa() {
+  unsigned long now = millis();
+
+  switch (currentMode) {
+    
+    case IDLE:
+      // Check if it's time to send the next packet
+      if (now - lastTxTime >= TX_INTERVAL) {
+        GpsPacket myData;
+        myData.timestamp = now;
+        // myData.latitude = 34.56777777777777;
+        // myData.longitude = -118.1234566666666;
+        myData.latitude = current_gps_lat;
+        myData.longitude = current_gps_long;
+        myData.alt_cm = 4500;
+
+        Serial.print(F("\n[LoRa] Transmitting... "));
+        int txState = radio.transmit((uint8_t*)&myData, sizeof(myData));
+
+        if (txState == RADIOLIB_ERR_NONE) {
+          Serial.println(F("Sent."));
+          radio.startReceive();      // Re-arm the ears
+          startListenTime = now;     // Mark when we started listening
+          currentMode = LISTENING;   // Switch state
+        }
+        lastTxTime = now;
+      }
+      break;
+
+    case LISTENING:
+      // 1. Check if the Hardware Pin (DIO0) is HIGH
+      if (digitalRead(26) == HIGH) {
+        TelemPacket incoming;
+        int state = radio.readData((uint8_t*)&incoming, sizeof(incoming));
+
+        if (state == RADIOLIB_ERR_NONE) {
+          Serial.print(F("SUCCESS! Speed: "));
+          Serial.println(incoming.speed);
+        }
+        
+        radio.standby(); // Done listening, clean slate
+        currentMode = IDLE;
+      }
+      // 2. Check for Timeout
+      else if (now - startListenTime >= RX_TIMEOUT) {
+        Serial.println(F("[LoRa] RX Timeout."));
+        radio.standby();
+        currentMode = IDLE;
+      }
+      break;
+  }
+}
+
 // --- ADDED: GPS Processing Function ---
 // This function reads from the GPS serial port and feeds the data to the
 // TinyGPS++ object. It should be called in every loop iteration.
 void processGPS() {
     while (gpsSerial.available() > 0) {
         gps.encode(gpsSerial.read());
+    }
+
+    if (gps.location.isValid()) {
+            current_gps_lat = gps.location.lat();
+            current_gps_long = gps.location.lng();
     }
 }
 
@@ -218,13 +336,17 @@ void setup() {
     power.setChargingLedMode(XPOWERS_CHG_LED_ON);
     Serial.println("PMU Initialized and LED is set to ON.");
 
-    // Initialize the ADS1115
-    if (!ads.begin()) {
-        Serial.println("Failed to initialize ADS. Check wiring!");
-        while (1);
-    }
-    ads.setGain(GAIN_ONE);
-    Serial.println("ADS1115 Initialized.");
+    // // Initialize the ADS1115
+    // if (!ads.begin()) {
+    //     Serial.println("Failed to initialize ADS. Check wiring!");
+    //     while (1);
+    // }
+    // ads.setGain(GAIN_ONE);
+    // Serial.println("ADS1115 Initialized.");
+
+    //Initialize LoRa
+    loRaSetup();
+    Serial.println("Initialized LoRa");
 
     // --- ADDED: Initialize GPS Serial ---
     Serial.println("Initializing GPS...");
@@ -259,8 +381,12 @@ void setup() {
 }
 
 void loop() {
+    float time_start = millis();
     // --- Process any incoming GPS data ---
     processGPS();
+
+    //Process loRa messages
+    handleLoRa();
 
     // -- Auto Logic
     int current_auto_state = digitalRead(AUTO_PIN);
@@ -302,8 +428,10 @@ void loop() {
 
 
     // --- Read analog joystick values from the ADS1115 ---
-    int16_t rawY = ads.readADC_SingleEnded(0);
-    int16_t rawX = ads.readADC_SingleEnded(1);
+    // int16_t rawY = ads.readADC_SingleEnded(0);
+    // int16_t rawX = ads.readADC_SingleEnded(1);
+    int16_t rawY = 0;
+    int16_t rawX = 0;
 
     // Apply deadzone and map to -1.0 to 1.0 range
     float throttle = 0.0;
@@ -364,7 +492,12 @@ void loop() {
     // Serial.printf("Throttle/Left: %f, Steering/Right: %f, Manual/Auto: %d\n", controlData.throttle, controlData.steering, controlData.auto_mode);
 
     // Send the data via ESP-NOW
-    esp_now_send(receiverMacAddress, (uint8_t *) &controlData, sizeof(controlData));
+    if (millis() - lastMotorCommandTime > motorCommandDelay){
+        esp_now_send(receiverMacAddress, (uint8_t *) &controlData, sizeof(controlData));
+        Serial.println(millis() - lastMotorCommandTime);
+        lastMotorCommandTime = millis();
+    }
+    
     
 
     // --- GPS Logging Logic (Non-Blocking) ---
@@ -413,5 +546,7 @@ void loop() {
         }
     }
     
-    delay(50);
+    // delay(50);
+    // Serial.print("Cycle Time: ");
+    // Serial.println(millis() - time_start);
 }
