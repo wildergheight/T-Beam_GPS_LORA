@@ -100,7 +100,7 @@ const unsigned long TX_INTERVAL = 1000;  // Send every 2 seconds
 const unsigned long RX_TIMEOUT = 300;   // Listen for 0.5 seconds
 
 // State Machine Variables
-enum RadioState { IDLE, LISTENING };
+enum RadioState { IDLE, TRANSMITTING, LISTENING };
 RadioState currentMode = IDLE;
 unsigned long lastTxTime = 0;
 unsigned long startListenTime = 0;
@@ -214,50 +214,60 @@ void loRaSetup() {
   }
 }
 
+// Create a flag to track if we are currently mid-transmission
+bool transmissionActive = false;
+
 void handleLoRa() {
   unsigned long now = millis();
 
   switch (currentMode) {
     
     case IDLE:
-      // Check if it's time to send the next packet
       if (now - lastTxTime >= TX_INTERVAL) {
         GpsPacket myData;
         myData.timestamp = now;
-        // myData.latitude = 34.56777777777777;
-        // myData.longitude = -118.1234566666666;
         myData.latitude = current_gps_lat;
         myData.longitude = current_gps_long;
         myData.alt_cm = 4500;
 
-        Serial.print(F("\n[LoRa] Transmitting... "));
-        int txState = radio.transmit((uint8_t*)&myData, sizeof(myData));
-
-        if (txState == RADIOLIB_ERR_NONE) {
-          Serial.println(F("Sent."));
-          radio.startReceive();      // Re-arm the ears
-          startListenTime = now;     // Mark when we started listening
-          currentMode = LISTENING;   // Switch state
+        Serial.print(F("[LoRa] Starting Asynchronous TX... "));
+        
+        // Use startTransmit instead of transmit (NON-BLOCKING)
+        int state = radio.startTransmit((uint8_t*)&myData, sizeof(myData));
+        
+        if (state == RADIOLIB_ERR_NONE) {
+          currentMode = TRANSMITTING; 
+          transmissionActive = true;
         }
         lastTxTime = now;
       }
       break;
 
+    case TRANSMITTING:
+      // Check if the hardware interrupt pin (DIO0) has gone HIGH
+      // This indicates the radio is finished sending the packet
+      if (digitalRead(26) == HIGH) {
+        Serial.println(F("Done!"));
+        radio.finishTransmit(); // Clean up radio state
+        
+        // Now switch to listening mode exactly like before
+        radio.startReceive();
+        startListenTime = millis();
+        currentMode = LISTENING;
+      }
+      break;
+
     case LISTENING:
-      // 1. Check if the Hardware Pin (DIO0) is HIGH
       if (digitalRead(26) == HIGH) {
         TelemPacket incoming;
         int state = radio.readData((uint8_t*)&incoming, sizeof(incoming));
-
         if (state == RADIOLIB_ERR_NONE) {
           Serial.print(F("SUCCESS! Speed: "));
           Serial.println(incoming.speed);
         }
-        
-        radio.standby(); // Done listening, clean slate
+        radio.standby();
         currentMode = IDLE;
       }
-      // 2. Check for Timeout
       else if (now - startListenTime >= RX_TIMEOUT) {
         Serial.println(F("[LoRa] RX Timeout."));
         radio.standby();
@@ -336,13 +346,13 @@ void setup() {
     power.setChargingLedMode(XPOWERS_CHG_LED_ON);
     Serial.println("PMU Initialized and LED is set to ON.");
 
-    // // Initialize the ADS1115
-    // if (!ads.begin()) {
-    //     Serial.println("Failed to initialize ADS. Check wiring!");
-    //     while (1);
-    // }
-    // ads.setGain(GAIN_ONE);
-    // Serial.println("ADS1115 Initialized.");
+    // Initialize the ADS1115
+    if (!ads.begin()) {
+        Serial.println("Failed to initialize ADS. Check wiring!");
+        while (1);
+    }
+    ads.setGain(GAIN_ONE);
+    Serial.println("ADS1115 Initialized.");
 
     //Initialize LoRa
     loRaSetup();
@@ -428,10 +438,10 @@ void loop() {
 
 
     // --- Read analog joystick values from the ADS1115 ---
-    // int16_t rawY = ads.readADC_SingleEnded(0);
-    // int16_t rawX = ads.readADC_SingleEnded(1);
-    int16_t rawY = 0;
-    int16_t rawX = 0;
+    int16_t rawY = ads.readADC_SingleEnded(0);
+    int16_t rawX = ads.readADC_SingleEnded(1);
+    // int16_t rawY = 0;
+    // int16_t rawX = 0;
 
     // Apply deadzone and map to -1.0 to 1.0 range
     float throttle = 0.0;
