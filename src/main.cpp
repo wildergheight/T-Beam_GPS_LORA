@@ -26,7 +26,6 @@
 #include <Arduino.h>
 #include <esp_now.h>
 #include <WiFi.h>
-#include <WiFiUdp.h> // ADDED for Phone GPS
 #include <Wire.h>
 #include <Adafruit_ADS1X15.h>
 #include "XPowersLib.h"
@@ -51,14 +50,6 @@
 #ifndef CONFIG_PMU_IRQ
 #define CONFIG_PMU_IRQ 35
 #endif
-
-// --- PHONE GPS CONFIG (Input your details here) ---
-const char* hotspot_ssid = "Test Wifi Please Ignore";
-const char* hotspot_pass = "freewifi";
-const int udpPort = 2000; 
-
-WiFiUDP udp;
-char packetBuffer[255];
 
 // --- Configuration ---
 uint8_t receiverMacAddress[] = {0x6C, 0xC8, 0x40, 0x86, 0x3C, 0x68};
@@ -286,23 +277,6 @@ void handleLoRa() {
   }
 }
 
-// --- NEW: Non-Blocking Phone GPS Processing ---
-void processPhoneGPS() {
-    int packetSize = udp.parsePacket();
-    if (packetSize) {
-        int len = udp.read(packetBuffer, 255);
-        for (int i = 0; i < len; i++) {
-            // Feed each character from the UDP packet to TinyGPS++
-            if (gps.encode(packetBuffer[i])) {
-                if (gps.location.isValid()) {
-                    current_gps_lat = gps.location.lat();
-                    current_gps_long = gps.location.lng();
-                }
-            }
-        }
-    }
-}
-
 // --- ADDED: GPS Processing Function ---
 // This function reads from the GPS serial port and feeds the data to the
 // TinyGPS++ object. It should be called in every loop iteration.
@@ -384,31 +358,6 @@ void setup() {
     loRaSetup();
     Serial.println("Initialized LoRa");
 
-    // --- WIFI SETUP for Phone GPS ---
-    Serial.println("Connecting to Phone Hotspot...");
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(hotspot_ssid, hotspot_pass);
-    
-    unsigned long wifi_timeout = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - wifi_timeout < 10000) {
-        delay(500);
-        Serial.print(".");
-    }
-    
-    if(WiFi.status() == WL_CONNECTED) {
-        Serial.println("\nWiFi Connected!");
-        Serial.print("T-Beam IP: "); Serial.println(WiFi.localIP());
-        udp.begin(udpPort);
-    } else {
-        Serial.println("\nWiFi Failed. Running without Phone GPS.");
-    }
-
-    WiFi.setSleep(false);
-
-    // 3. Get the channel from the connected WiFi
-    int channel = WiFi.channel();
-    Serial.printf("\nConnected! Using Channel: %d\n", channel);
-
     // --- ADDED: Initialize GPS Serial ---
     Serial.println("Initializing GPS...");
     // Note: T-Beam uses different pins for different versions. v1.1 uses 34, 12.
@@ -444,8 +393,7 @@ void setup() {
 void loop() {
     float time_start = millis();
     // --- Process any incoming GPS data ---
-    // processGPS();
-    processPhoneGPS();    
+    processGPS();
 
     //Process loRa messages
     handleLoRa();
@@ -534,7 +482,7 @@ void loop() {
             controlData.throttle = -0.80;
             controlData.steering = 1;
         }
-        else if (throttle <= -0.5 && abs(steering <= 0.5)) { // SLOWER (BACK)
+        else if (throttle < -0.5 && abs(steering < 0.5)) { // SLOWER (BACK)
             controlData.throttle = -0.66;
             controlData.steering = 0.66;
         }
@@ -551,12 +499,12 @@ void loop() {
     // Serial.println(steering);
     // Serial.println(auto_mode);
 
-    Serial.printf("Throttle/Left: %f, Steering/Right: %f, Manual/Auto: %d\n", controlData.throttle, controlData.steering, controlData.auto_mode);
+    // Serial.printf("Throttle/Left: %f, Steering/Right: %f, Manual/Auto: %d\n", controlData.throttle, controlData.steering, controlData.auto_mode);
 
     // Send the data via ESP-NOW
     if (millis() - lastMotorCommandTime > motorCommandDelay){
         esp_now_send(receiverMacAddress, (uint8_t *) &controlData, sizeof(controlData));
-        // Serial.println(millis() - lastMotorCommandTime);
+        Serial.println(millis() - lastMotorCommandTime);
         lastMotorCommandTime = millis();
     }
     
