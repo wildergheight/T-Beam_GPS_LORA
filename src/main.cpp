@@ -476,10 +476,10 @@ void loop() {
         }
         else if (steering < -0.5) { // RIGHT
             controlData.throttle = -1;
-            controlData.steering = 0.80;
+            controlData.steering = 0.85;
         }
         else if (steering > 0.5) { // LEFT
-            controlData.throttle = -0.80;
+            controlData.throttle = -0.85;
             controlData.steering = 1;
         }
         else if (throttle < -0.5 && abs(steering < 0.5)) { // SLOWER (BACK)
