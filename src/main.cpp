@@ -27,6 +27,7 @@
 #include <esp_now.h>
 #include <WiFi.h>
 #include <WiFiUdp.h> // ADDED for Phone GPS
+#include <esp_wifi.h> // Required for esp_wifi_set_channel
 #include <Wire.h>
 #include <Adafruit_ADS1X15.h>
 #include "XPowersLib.h"
@@ -288,6 +289,11 @@ void handleLoRa() {
 
 // --- NEW: Non-Blocking Phone GPS Processing ---
 void processPhoneGPS() {
+
+    if (WiFi.status() != WL_CONNECTED) {
+        return; 
+    }
+
     int packetSize = udp.parsePacket();
     if (packetSize) {
         int len = udp.read(packetBuffer, 255);
@@ -390,24 +396,41 @@ void setup() {
     WiFi.begin(hotspot_ssid, hotspot_pass);
     
     unsigned long wifi_timeout = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - wifi_timeout < 10000) {
+    while (WiFi.status() != WL_CONNECTED && millis() - wifi_timeout < 5000) {
         delay(500);
         Serial.print(".");
     }
-    
+    int channel = WiFi.channel();
+
     if(WiFi.status() == WL_CONNECTED) {
         Serial.println("\nWiFi Connected!");
         Serial.print("T-Beam IP: "); Serial.println(WiFi.localIP());
         udp.begin(udpPort);
     } else {
-        Serial.println("\nWiFi Failed. Running without Phone GPS.");
+        Serial.println("\nWiFi Failed. Running without Phone GPS. Defaulting to Channel 1");
+
+        WiFi.disconnect(true);
+        WiFi.mode(WIFI_STA);
+
+        channel = 1;
+        // This forces the physical radio to stay on Channel 1
+        esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+
     }
 
     WiFi.setSleep(false);
 
     // 3. Get the channel from the connected WiFi
-    int channel = WiFi.channel();
-    Serial.printf("\nConnected! Using Channel: %d\n", channel);
+    
+    Serial.printf("ESP-NOW Home Channel: %d\n", channel);
+
+    // // Register the receiver as a peer
+    // esp_now_peer_info_t peerInfo = {};
+    // memcpy(peerInfo.peer_addr, receiverMacAddress, 6);
+
+    // // CHANGE THIS: Use the actual channel from the WiFi connection
+    // peerInfo.channel = channel; 
+    // peerInfo.encrypt = false;
 
     // --- ADDED: Initialize GPS Serial ---
     Serial.println("Initializing GPS...");
@@ -415,29 +438,30 @@ void setup() {
     gpsSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_TX_PIN, GPS_RX_PIN);
     Serial.println("GPS Serial Port Initialized. Waiting for data...");
 
-    // Set device as a Wi-Fi Station
-    WiFi.mode(WIFI_STA);
+   // 1. MUST set mode first
+    WiFi.mode(WIFI_STA); 
 
-    // Initialize ESP-NOW
+    // 2. Initialize ESP-NOW (This was missing!)
     if (esp_now_init() != ESP_OK) {
         Serial.println("Error initializing ESP-NOW");
         return;
     }
 
+    // 3. Register the callback
     esp_now_register_send_cb(onDataSent);
 
-    // Register the receiver as a peer
+    // 4. Setup Peer Info
     esp_now_peer_info_t peerInfo = {};
     memcpy(peerInfo.peer_addr, receiverMacAddress, 6);
-    peerInfo.channel = 0;
+    peerInfo.channel = channel; // Match the WiFi channel
     peerInfo.encrypt = false;
 
+    // 5. Finally add the peer
     if (esp_now_add_peer(&peerInfo) != ESP_OK) {
         Serial.println("Failed to add peer");
         return;
     }
 
-    Serial.println("ESP-NOW Initialized. Ready to send data.");
     power.enableGeneralAdcChannel();
 }
 
@@ -551,12 +575,16 @@ void loop() {
     // Serial.println(steering);
     // Serial.println(auto_mode);
 
-    Serial.printf("Throttle/Left: %f, Steering/Right: %f, Manual/Auto: %d\n", controlData.throttle, controlData.steering, controlData.auto_mode);
+    // Serial.printf("Throttle/Left: %f, Steering/Right: %f, Manual/Auto: %d\n", controlData.throttle, controlData.steering, controlData.auto_mode);
 
     // Send the data via ESP-NOW
     if (millis() - lastMotorCommandTime > motorCommandDelay){
-        esp_now_send(receiverMacAddress, (uint8_t *) &controlData, sizeof(controlData));
+        esp_err_t result = esp_now_send(receiverMacAddress, (uint8_t *) &controlData, sizeof(controlData));
         // Serial.println(millis() - lastMotorCommandTime);
+        if (result != ESP_OK) {
+            Serial.print("ESP-NOW Send Error: ");
+            Serial.println(result);
+        }
         lastMotorCommandTime = millis();
     }
     
