@@ -542,7 +542,7 @@ void loop() {
     // Serial.println(steering);
 
     // Auto Control Logic (Supercedes manual control above)
- 
+
     if (current_auto_state == 1){
         controlData.auto_mode = true;
         // IN AUTO MODE, THROTTLE IS RIGHT MOTOR AND STEERING IS LEFT MOTOR
